@@ -1,0 +1,14 @@
+# Logs gerados em tempo de execucao
+*.log
+log_otimizacao.txt
+log_finalizar_cs2.txt
+
+# Arquivos temporarios do Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Ambiente/editor
+.vscode/
+.idea/
+*.tmp

@@ -1,0 +1,106 @@
+#Requires -Version 5.1
+[CmdletBinding()] param()
+
+$Desktop = [Environment]::GetFolderPath('Desktop')
+$Log = Join-Path $Desktop 'log_finalizar_cs2.txt'
+Start-Transcript -Path $Log -Append -Force | Out-Null
+Write-Host '=== Finalizador automatico do CS2 ===' -ForegroundColor Cyan
+
+$Roots = @()
+Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object { $Roots += $_.DeviceID }
+$Roots += 'C:'
+$Roots = $Roots | Select-Object -Unique
+
+$LibraryPaths = [System.Collections.Generic.List[string]]::new()
+foreach ($root in $Roots) {
+    foreach ($candidate in @((Join-Path $root 'Steam'), (Join-Path $root 'Program Files (x86)\Steam'))) {
+        if (Test-Path $candidate) { [void]$LibraryPaths.Add($candidate) }
+    }
+}
+
+try {
+    $steamPath = (Get-ItemProperty 'HKCU:\Software\Valve\Steam' -Name SteamPath -ErrorAction Stop).SteamPath
+    if ($steamPath) { [void]$LibraryPaths.Add($steamPath) }
+} catch {}
+
+foreach ($steamLib in @($LibraryPaths)) {
+    $libraryFile = Join-Path $steamLib 'steamapps\libraryfolders.vdf'
+    if (Test-Path $libraryFile) {
+        $text = Get-Content $libraryFile -Raw
+        $matches = [regex]::Matches($text, '"path"\s*"([^"]+)"', 'IgnoreCase')
+        foreach ($match in $matches) {
+            $path = $match.Groups[1].Value.Replace('\\','\')
+            if (Test-Path $path) { [void]$LibraryPaths.Add($path) }
+        }
+    }
+}
+
+$LibraryPaths = $LibraryPaths | Select-Object -Unique
+$CS2Exe = $null
+$CfgDir = $null
+foreach ($library in $LibraryPaths) {
+    $steamAppCommon = Join-Path $library 'steamapps\common\Counter-Strike Global Offensive'
+    $exe = Join-Path $steamAppCommon 'game\bin\win64\cs2.exe'
+    if (Test-Path $exe) {
+        $CS2Exe = $exe
+        $CfgDir = Join-Path $steamAppCommon 'game\csgo\cfg'
+        break
+    }
+}
+
+if (-not $CS2Exe) {
+    foreach ($root in $Roots) {
+        $candidate = Get-ChildItem -LiteralPath $root -Filter cs2.exe -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like '*Counter-Strike Global Offensive*\game\bin\win64\cs2.exe' } |
+            Select-Object -First 1
+        if ($candidate) {
+            $CS2Exe = $candidate.FullName
+            $gameDir = Split-Path (Split-Path (Split-Path $candidate.FullName -Parent) -Parent) -Parent
+            $CfgDir = Join-Path $gameDir 'csgo\cfg'
+            break
+        }
+    }
+}
+
+if (-not $CS2Exe) {
+    Write-Host '[AGUARDANDO] CS2 ainda nao encontrado. Execute novamente apos concluir o download.' -ForegroundColor Yellow
+    Stop-Transcript | Out-Null
+    exit 1
+}
+
+New-Item -ItemType Directory -Path $CfgDir -Force | Out-Null
+$AutoexecText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__AUTOEXEC_BASE64__'))
+[System.IO.File]::WriteAllText((Join-Path $CfgDir 'autoexec.cfg'), $AutoexecText, [System.Text.UTF8Encoding]::new($false))
+Write-Host ('[OK] Autoexec criada: ' + (Join-Path $CfgDir 'autoexec.cfg')) -ForegroundColor Green
+
+try {
+    $layers = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers'
+    if (-not (Test-Path $layers)) { New-Item -Path $layers -Force | Out-Null }
+    $current = (Get-ItemProperty -LiteralPath $layers -Name $CS2Exe -ErrorAction SilentlyContinue).$CS2Exe
+    $flags = @()
+    if ($current) { $flags = @($current -split ' ' | Where-Object { $_ }) }
+    $flags = @($flags | Where-Object { $_ -ne 'DISABLEDXMAXIMIZEDWINDOWEDMODE' })
+    $flags += '~ DISABLEDXMAXIMIZEDWINDOWEDMODE'
+    Set-ItemProperty -LiteralPath $layers -Name $CS2Exe -Value ($flags -join ' ') -Type String
+    Write-Host '[OK] Otimizacao de tela inteira desativada.' -ForegroundColor Green
+} catch {
+    Write-Host ('[ERRO] Compatibilidade: ' + $_.Exception.Message) -ForegroundColor Red
+}
+
+try {
+    $gpuKey = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
+    if (-not (Test-Path $gpuKey)) { New-Item -Path $gpuKey -Force | Out-Null }
+    Set-ItemProperty -LiteralPath $gpuKey -Name $CS2Exe -Value 'GpuPreference=2;' -Type String
+    Write-Host '[OK] GPU de Alto Desempenho configurada.' -ForegroundColor Green
+} catch {
+    Write-Host ('[ERRO] GPU: ' + $_.Exception.Message) -ForegroundColor Red
+}
+
+try {
+    $priorityKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\cs2.exe\PerfOptions'
+    if (-not (Test-Path $priorityKey)) { New-Item -Path $priorityKey -Force | Out-Null }
+    Set-ItemProperty -LiteralPath $priorityKey -Name 'CpuPriorityClass' -Value 3 -Type DWord
+} catch {}
+
+Write-Host 'Finalizacao concluida.' -ForegroundColor Green
+Stop-Transcript | Out-Null
